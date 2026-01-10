@@ -1,0 +1,42 @@
+#!/bin/bash
+#
+# Usage: makehex <in file> [outfile]
+#
+# Given an input file, will format it in hex format.
+# If outfile is specified, it will redirect the output there otherwise
+# it outputs to stdout.
+
+if [[ $# -gt 2 || $# -lt 1 ]] ; then
+   echo "Usage: makehex <in file> [outfile]"
+   echo
+   echo "Given an input file, will format it in hex format."
+   echo "If outfile is specified, it will redirect the output there."
+   echo "If outfile is not given, it will output to stdout."
+   exit 1
+fi
+
+INFILE=$1
+shift
+OUTFILE=$1
+
+# figure out if we are linux or AIX
+PLATFORM=`uname -a | awk '{print $1}'`
+
+if [[ $PLATFORM = "Linux" ]] ; then
+   COMMAND="hexdump -Cv $INFILE"
+elif [[ $PLATFORM = "AIX" ]] ; then
+   COMMAND="lquerypv -h $INFILE 0 1000000"
+else
+   echo "Unknown platform: $PLATFORM"
+   exit 1
+fi
+
+
+# if outfile is given add the redirect to the command
+if [[ -n "$OUTFILE" ]] ; then
+   COMMAND="$COMMAND > $OUTFILE"
+fi
+
+echo "Executing command: $COMMAND"
+echo
+eval $COMMAND

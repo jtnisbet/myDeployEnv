@@ -1,0 +1,5 @@
+alias s='echo "git status";git status'
+alias ls='ls --color=auto -p'
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+

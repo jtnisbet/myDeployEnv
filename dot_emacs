@@ -1,0 +1,31 @@
+;; My own additions
+(set-foreground-color "white")
+(set-background-color "midnightblue")
+(setq c-default-style "k&r" c-basic-offset 4)
+(setq-default indent-tabs-mode nil)
+(global-set-key [(control ?h)] 'delete-backward-char)
+
+;; add some C highlighting for other file types by name
+(add-to-list 'auto-mode-alist '("\\.cce\\'" . c++-mode))
+(add-to-list 'auto-mode-alist '("\\.cu\\'" . c++-mode))
+(add-to-list 'auto-mode-alist '("\\.tpp\\'" . c++-mode))
+
+;; The remaining stuff is modified by the emacs program itself when you use
+;; the customization menus. You can edit them yourself too I suppose
+(custom-set-variables
+ ;; custom-set-variables was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ '(inhibit-startup-screen t)
+ '(column-number-mode t)
+ '(large-file-warning-threshold 100000000)
+ '(line-number-display-limit-width 500)
+ '(tool-bar-mode nil)
+ '(truncate-lines t))
+(custom-set-faces
+ ;; custom-set-faces was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.(
+ ;; If there is more than one, they won't work right.
+ )

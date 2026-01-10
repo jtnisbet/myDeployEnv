@@ -1,0 +1,190 @@
+#!/usr/bin/env perl
+
+################################################################################
+# prettytable -f <input file> [-d <delimiter>] [-t <title size>]          #
+#                                                                              #
+# Takes a delimited file, assumed to be containing table-like data where it    #
+# has rows of columns.  Computes the max size of each column and then          #
+# redisplays it so that all columns are right justified and organized nicely.  #
+#                                                                              #
+# -f <input file>                                                              #
+# Required argument. <input file> is the delimited table data you want to      #
+# format.                                                                      #
+#                                                                              #
+# -d <delimiter>                                                               #
+# Optional argument.  <delimiter> is the character that splits each column.    #
+#                                                                              #
+# -t <title size>                                                              #
+# Optional argument.  If supplied, then the titles will be truncated down to a #
+# maximum width of <title size> characters. If the data width exceeds the      #
+# title size though then we'll still use the data's max width.                 #
+#                                                                              #
+################################################################################
+
+use Getopt::Long;
+use File::Path;
+
+# globals
+my $inputFile;              # input arg.  The name of the input file
+my $delimiter;              # input arg.  The delimiter between columns 
+my $trimSize;               # input arg.  The max title width
+my $noTitles;               # input arg.  If there's titles yay or nay
+my $line;                   # staging area for each line of input
+my @fileColumnData;         # array that holds the column data.
+my @colLengths;             # array for saving the max length of each column
+my $colIdx;                 # temp for indexing columns
+
+GetOptions("f=s" => \$inputFile,
+           "d=s" => \$delimiter,
+           "t=s" => \$trimSize);
+
+if (!$inputFile)
+{
+   print "-f option is required.\n\n";
+   usage();
+}
+
+# open the input file
+open(my $fileHdl, "<", "$inputFile") or die "Failed to open $inputFile: $!\n";
+
+# default delimiter is whitespace
+# If user gives non-default delimiter, whitespace is not removed so spaces
+# will show up as part of column data.
+if (!$delimiter)
+{
+   $delimiter = " ";
+}
+
+# Two passes over the entire file.
+# The first pass will compute the max width of the columns, and it has a special
+# case on the first line of data for specialized title handling depending on
+# options.
+# The second pass will do the actual display work.
+
+# Pass 1a: (first line special handling)
+# --------------------------------------
+
+# Get the line and split it into fields
+$line = getLine();
+@fileColumnData = split(/$delimiter+/, $line);
+$colIdx = 0;
+
+# If the user input a title max length with -t option, then we are assuming that
+# this first row of data is really the title line and we'll truncate this line
+# later.
+foreach (@fileColumnData)
+{
+   # By default, capture the length of this column
+   $colLengths[$colIdx] = length($_);
+
+   # If:
+   # - they did specify a max length for the title column using the trim option
+   # - the given column exceeds the max length given by the title trim option.
+   if ($trimSize &&
+       $colLengths[$colIdx] > $trimSize)
+   {
+      # length of column is too big for the title, force it smaller size.
+      # Note that the column length can still end up being larger if actual data
+      # exceeds this length later though.
+      $colLengths[$colIdx] = $trimSize;
+   }
+       
+   $colIdx++;
+}
+
+# Pass 1b: loop over the rest of the lines, compute max lengths
+# -------------------------------------------------------------
+while (!eof $fileHdl)
+{
+   # get a line and split it
+   $line = getLine();
+   @fileColumnData = split(/$delimiter+/, $line);
+
+   $colIdx = 0;
+   foreach (@fileColumnData)
+   {
+      # compare if this columns length is larger than our saved max
+      # and update accordingly
+      my $currLen = length($_);
+      if ($currLen > $colLengths[$colIdx])
+      {
+         $colLengths[$colIdx] = $currLen;
+      }
+
+      $colIdx++;
+   }
+}
+
+# Add 2 spaces to each length to give spaces between the columns.
+for (my $i=0;$i < $colIdx;$i++)
+{
+   $colLengths[$i] = $colLengths[$i] + 2;
+   # print "col[$i] length is: $colLengths[$i]\n";
+}
+
+# Pass 2a: get the first line again and display it
+# ------------------------------------------------
+
+# reposition at the start of the file again.
+seek $fileHdl, 0, 0;
+
+# get the first line and split it
+$line = getLine();
+@fileColumnData = split(/$delimiter+/, $line);
+
+# If the user used -t, then the text of the data may be longer than the
+# captured width for this first line, which we are assuming is the title.
+# Thus, when displaying this first line, truncate it to max midth of the
+# column (harmless if they didn't use -t).
+$colIdx = 0;
+foreach (@fileColumnData)
+{
+    my $truncatedTitle = substr($_, 0, ($colLengths[$colIdx] - 2));
+    printf "%$colLengths[$colIdx]s", $truncatedTitle;
+    $colIdx++;
+}
+print "\n";
+
+# Pass 2b: loop over the rest of the file and display it
+# ------------------------------------------------------
+while (!eof $fileHdl)
+{
+   # get a line and split it
+   $line = getLine();
+   @fileColumnData = split(/$delimiter+/, $line);
+
+   $colIdx = 0;
+   foreach (@fileColumnData)
+   {
+      printf "%$colLengths[$colIdx]s", $_;
+      $colIdx++; 
+   }
+   print "\n";
+}
+
+# close out the file
+close $fileHdl;
+
+
+#################################################################################
+# Sub routines                                                                  #
+################################################################################
+
+sub usage()
+{
+   print "prettytable -f <input file> [-d <delimiter>] [-t <title size>]\n\n";
+   die "See the script header for more details on usage.\n";
+}
+
+# helper function to get a line.
+# removes the newline itself, as well as leading and trailing whitespace.
+# Does not remove whitespace "inside" the line
+sub getLine()
+{
+   my $line = <$fileHdl>;
+   chomp($line);
+   $line =~ s/\s+$//;
+   $line =~ s/^\s+//;
+
+   return $line;
+}

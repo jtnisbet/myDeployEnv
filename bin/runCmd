@@ -1,0 +1,463 @@
+#!/bin/bash
+#
+#################################################################################
+#  Name:        runCmd                                                          #
+#                                                                               #
+#  Description: Bash shell functionality to execute commands with nice syntax.  #
+#                                                                               #
+#               The purpose of this is to provide a uniform look and feel with  #
+#               consistent error handling and output formatting for your shell  #
+#               scripts.                                                        #
+#                                                                               #
+#               Main code                                                       #
+#               Runs a command with built-in output formatting and other        #
+#               options like timeouts, error handling, loops, retries etc.      #
+#               See the comments in the main block to learn the arguments.      #
+#                                                                               #
+#               Note that this script makes use of helper functions that are    #
+#               provided in a different script called msgFmt.sh                 #
+#                                                                               #
+#  Example:                                                                     #
+#               #!/bin/bash                                                     #
+#               #                                                               #
+#               # example to run ls -l command                                  #
+#               myCmd="ls -l"                                                   #
+#               runCmd -c "${myCmd}" -o stdout -d "Run ls command"              #
+#                                                                               #
+#  Author:      Jamie Nisbet                                                    #
+#  Revisions:   Dec 21, 2018   : First drop.                                    #
+#                                                                               #
+#################################################################################
+
+# A prereq for this script is to get the msg formatting functions.
+source msgFmt.sh
+
+# globals
+TIMEOUT_CHECK="/tmp/.runCmdTimeout.out"
+INTERVAL_CHECK="/tmp/.runCmdInterval.out"
+RUN_CMD_OUT="/tmp/runCmd.out"
+ERR_NORMAL=0
+ERR_TIMEOUT=1
+ERR_INTERVAL=2
+
+#################################################################################
+#  Function: timeHandler                                                        #
+#  Description: A helper function to sleep for x seconds and then do an         #
+#               action (depending on args).                                     #
+#               If the parent command runs past the timeout time, then this     #
+#               function will kill the parent command and drive timeout error   #
+#               back to the parent script.                                      #
+#               If interval handling is requested, then this will loop/sleep    #
+#               based on the interval and call the interval command after each  #
+#               interval.                                                       #
+#               If the interval command returns non-zero, then we consider this #
+#               as a failed interval check which causes us to kill the parent   #
+#               command and drive interval error back to the parent script.     #
+#################################################################################
+timeHandler()
+{
+   timeoutTime=$1
+   intervalTime=$2
+   pidToKill=$3
+   intCmd=$4
+
+   # If there is no defined interval, then we'll simply sleep for the entire
+   # duration of the timeout, and then kill the pid if the timeout is reached.
+   #
+   # However, if there is an interval time, then we'll be looping multiple sleeps
+   # and invoking a command at each interval
+   if [ $intervalTime -eq 0 ] ; then
+      sleepTime=${timeoutTime}
+   else
+      sleepTime=${intervalTime}
+      totalWait=0
+
+      intervalCmdArray=( )
+      while IFS= read -r -d ''; do
+         intervalCmdArray+=( "$REPLY" )
+      done < <(xargs printf '%s\0' <<< "${intCmd}")
+   fi
+
+   while true
+   do
+      # invoke the sleep
+      sleep ${sleepTime}
+      totalWait=$(($totalWait+$sleepTime))
+
+      # If the total time that we have been asleep has hit the timeout then we
+      # shall generate the timeout failure case and kill the running job.
+      if [ ${totalWait} -ge ${timeoutTime} ] ; then
+         checkPid=$(ps -p ${pidToKill})
+         rc=$?
+         if [ ${rc} -eq 0 ] ; then
+            # Use a file to signal to the parent that we timed out for error
+            # handling.  parent will look for this file.
+            touch ${TIMEOUT_CHECK}
+            kill -TERM ${pidToKill}
+            wait ${pidToKill} 2>/dev/null
+
+            # this was a timeout where we killed the running command, so now
+            # we quit.
+            break
+         fi
+      else
+         # We did not reach the timeout yet so loop back for another sleep.
+         # Adjust the sleep interval if needed. For example, if the sleep
+         # interval is 5 and the timeout is 17, then after the first 3 sleeps
+         # you have 15 seconds total slept, and have only 2 more seconds before
+         # the timeout will be hit.
+         timeDiff=$((timeoutTime-totalWait))
+         if [ ${timeDiff} -lt ${intervalTime} ] ; then
+            sleepTime=${timeDiff}
+         fi
+
+         # Now, invoke a user command to run at this interval
+         "${intervalCmdArray[@]}"
+         intervalRc=$?
+
+         # if the interval command failed
+         if [ ${intervalRc} -ne 0 ] ; then
+            # Use a file to signal to the parent that the interval cmd hit an
+            # error.  parent will look for this file.
+            touch ${INTERVAL_CHECK}
+            kill -TERM ${pidToKill}
+            wait ${pidToKill} 2>/dev/null
+
+            # this was an error case that caused us to kill the running command,
+            # so now we quit.
+            break
+         fi
+      fi
+
+   done
+}
+
+#################################################################################
+#  Function: cleanup                                                            #
+#  Description: Does post execution cleanups                                    #
+#################################################################################
+runCmdCleanup()
+{
+   timerPid=$1
+   commandPid=$2
+
+   # Use wait after killing with dev/null to avoid spewing noise to the screen
+   # as we want this to be silent
+   
+   # check if the timeout pid exists and kill it if it's there.
+   if [ $timerPid -ne 0 ] ; then
+      checkPid=$(ps -p ${timerPid})
+      rc=$?
+      if [ ${rc} -eq 0 ] ; then
+         kill -TERM ${timerPid}
+         wait ${timerPid} 2>/dev/null 
+      fi
+   fi
+
+   # check if the command pid exists and remove it if it's there.
+   if [ $commandPid -ne 0 ] ; then
+      checkPid=$(ps -p ${commandPid})
+      rc=$?
+      if [ ${rc} -eq 0 ] ; then
+         kill -TERM ${commandPid}
+         wait ${commandPid} 2>/dev/null 
+      fi
+   fi
+
+   # clean up the error file if it exists
+   if [ -f ${RUN_CMD_OUT} ] ; then
+      rm ${RUN_CMD_OUT}
+   fi
+
+   # clean up the timeout check file if it exists
+   if [ -f ${TIMEOUT_CHECK} ] ; then
+      rm -f ${TIMEOUT_CHECK}
+   fi
+
+   # clean up the interval check file if it exists
+   if [ -f ${INTERVAL_CHECK} ] ; then
+      rm -f ${INTERVAL_CHECK}
+   fi
+}
+
+#################################################################################
+#  Main                                                                         #
+#################################################################################
+
+# Set the defaults.  These defaults can get clobbered by the argument handling
+cmdArray=()
+cmdDesc="Running command"
+logFile=""
+output="none"
+timeout=0
+stats=0
+retries=1
+numLoops=1
+loopWait=0
+waitInterval=0
+intervalCmd="printf \".\""
+verbose=0
+cmdPid=0
+timerPid=0
+errType=0
+
+while getopts "svc:o:d:t:r:w:l:i:" opt
+do
+   # debug only
+   #echo "Processing option: $opt with OPTIND = ${OPTIND} and OPTARG = ${OPTARG}"
+       
+   case $opt in
+           
+      # The command array. Convert input string into array.  But you can't pass
+      # in array as arg so it starts out as a string.
+      # By default, this will use space delimiter to carve up the command into
+      # arguments. This is not desired when the user inputs multiple args that
+      # are surrounded by quotes.  i.e. echo "this is a test" should have only 2
+      # values in the array.  "this is a test" should be parsed as only a single
+      # argument as a string. Hence, the special handling in here.
+      c)
+         # found this on internet. Uses xargs with printf to create null
+         # terminated strings and removes the quotes, but preserves the fact
+         # that the string contained within the quotes is a single arg
+         cmdArray=( )
+         while IFS= read -r -d ''; do
+            cmdArray+=( "$REPLY" )
+         done < <(xargs printf '%s\0' <<<"${OPTARG}")
+         ;;
+         
+      # Where does the command output go?
+      # Possible values:
+      #    'none'     - Do not display the command outputs (default)
+      #    'stdout'   - Display the command output to the screen
+      #    <filename> - Write the output to the file path given
+      o) output=${OPTARG}
+         ;;
+         
+      # When running a command, display a description of what it is running
+      d) cmdDesc=${OPTARG}
+         ;;
+         
+      # Interrupt the command if it times out after this many seconds
+      t) timeout=${OPTARG}
+         ;;
+
+      # Show extra junk, debug info, the command itself, updates after each wait
+      # interval.
+      v) verbose=1
+         ;;
+
+      # Collect and display statistics on the command run.  For example how long
+      # it took etc.  Haven't implement this yet.  maybe later.
+      s) stats=1
+         ;;
+
+      # A number of times to try the command if it failed. Can be useful along
+      # with the timeout option.
+      r) retries=${OPTARG}
+         ;;
+
+      # Wait interval in seconds.  This is the amount of time to wait before
+      # taking some display/update action.  When the wait interval is reached it
+      # does not interrupt the command.
+      w) waitInterval=${OPTARG}
+         ;;
+
+      # A command to run after each wait interval.  The default will display
+      # a single dot
+      # We need to pass this around, so don't turn it into an array just yet
+      # and instead save it as a string for now.
+      # Note that the return code of this command is important. If it returns a
+      # non-zero value, then it will behaive kinda like a timeout where we will
+      # interrupt the running command to generate a failure.
+      i) intervalCmd="${OPTARG}"
+         ;;
+
+      # A number of times to loop the command.  This is different from a retry
+      # loop.  In the retry loop, the commands stops looping if it returns
+      # successfully.  In the looping case, the command continues to loop.
+      # The syntax for this argument is in the force loops:sleep.  For example
+      # -l 4:1 will loop 4 times with 1 second sleep in between each run.
+      l)
+         IFS=':' read -ra loopArg <<< "${OPTARG}"
+         numLoops=${loopArg[0]}
+         loopWait=${loopArg[1]}
+         ;;
+      
+      ?) echo "Invalid syntax for runCmd() invocation"
+         exit 1
+         ;;
+   esac
+done
+
+# Argument validations
+if [ ${waitInterval} -gt 0 -a ${timeout} -eq 0 ] ; then
+   echo "Error: You must provide a timeout value (with -t) if you are going to use wait intervals"
+   exit 1
+fi
+
+if [ ${waitInterval} -gt 0 -a ${waitInterval} -ge ${timeout} ] ; then
+   echo "Error: The wait interval cannot be larger or equal to the timeout"
+   exit 1
+fi
+
+if [ $verbose -eq 1 ] ; then
+   echo
+   echo "Arguments:"
+   echo "----------" 
+   echo "cmdArray     : ${cmdArray[@]}"
+   echo "cmdDesc      : ${cmdDesc}"
+   echo "output       : ${output}"
+   echo "timeout      : ${timeout}"
+   echo "stats        : ${stats}"
+   echo "retry        : ${retry}"
+   echo "waitInterval : ${waitInterval}"
+   echo "intervalCmd  : ${intervalCmd}"
+   echo "numLoops     : ${numLoops}"
+   echo "loopWait     : ${loopWait}"
+   echo "verbose      : ${verbose}"
+   echo
+fi
+
+# Determine if we want to give a newline after the entry message.
+# Basically, if there is going to be any text after the entry message display
+# then we should write a newline after it.
+if [ "${output}" != "stdout" -a ${waitInterval} -eq 0 ] ; then
+   singleLine=1
+else
+   singleLine=0
+fi
+
+
+loopCount=0
+while [ ${loopCount} -lt ${numLoops} ]
+do      
+   # Now, execute the command in the background and decide where the output should
+   # go.
+   tryCount=0
+
+   while [ ${tryCount} -lt ${retries} ]
+   do
+
+      # Display text that the command has started
+      # We will display an Ok or a FAILED later depending on how the command
+      # progress went.
+      if [ ${tryCount} -eq 0 ] ; then
+
+         if [ ${numLoops} -gt 1 ] ; then
+            pre="Run ${loopCount}: "
+         else
+            pre=""
+         fi
+
+         msgEnter "${pre}${cmdDesc}"
+
+         if [ ${singleLine} -eq 0 ] ; then
+            echo
+         fi
+      
+      else
+         msgEnter "${pre}Retry ${tryCount}: ${cmdDesc}"       
+      fi
+      
+      if [ "${output}" == "none" ] ; then
+         # If the output is not needed, we still capture it to a file so that we
+         # can display some lines of error text if needed.
+         output="${RUN_CMD_OUT}" 
+         "${cmdArray[@]}" > ${output} 2>&1 &
+         cmdPid=$!
+      elif [ "${output}" == "stdout" ] ; then  
+         "${cmdArray[@]}" 2>&1 &
+         cmdPid=$!
+      else
+         "${cmdArray[@]}" > ${output} 2>&1 &
+         cmdPid=$!
+      fi
+
+      # Send out a timeout job to interrupt and kill the main command if it reaches
+      # the timeout.
+      # Note that the time handler may invoke an interval command that displays to
+      # stdout, so do not redirect any outputs here when calling the timeHandler
+      if [ ${timeout} -ne 0 ] ; then
+         timeHandler "${timeout}" "${waitInterval}" "${cmdPid}" "${intervalCmd}" &
+         timerPid=$!
+      fi
+
+      # At this point in time we have potentially some children running:
+      # 1) the command the user wanted to run
+      # 2) the background timeout counter job
+      # Thus, register a cleanup handler here to ensure these are removed later
+      # either when the script completes or it quit for some reason.
+      trap 'runCmdCleanup ${timerPid} ${cmdPid}' EXIT
+   
+      # Now, wait for the main command to come back and capture it's exit code.
+      wait ${cmdPid} 2>/dev/null
+      cmdExitCode=$?
+
+      # The command has completed.
+
+      if [ ${singleLine} -eq 0 ] ; then
+         printf "\nCommand completion: "
+      fi
+
+      if [ ${cmdExitCode} -eq 0 ] ; then
+         msgOK "OK"
+      elif [ ${timeout} -ne 0 -a -f ${TIMEOUT_CHECK} ] ; then
+         msgFail "TIMEOUT"
+         errType=${ERR_TIMEOUT}
+      elif [ -f ${INTERVAL_CHECK} ] ; then
+         msgFail "FAILED INTERVAL CHECK"
+         errType=${ERR_INTERVAL} 
+      else
+         msgFail "FAILED"
+         errType=${ERR_NORMAL}
+      fi
+
+      # If there was an error, and we were not going to stdout, and we are in
+      # verbose mode, then display the error from the output. Timeout errors
+      # don't need to be shown as they are obviously a timeout.
+      if [ ${cmdExitCode} -ne 0 -a \
+           "${output}" != "stdout" -a \
+           ${verbose} -eq 1 -a \
+           ${errType} -eq ${ERR_NORMAL} ] ; then
+         echo
+         msgError "" "${cmdExitCode}" "${output}"
+      fi
+
+      # If command was successful then we are done
+      if [ ${cmdExitCode} -eq 0 ] ; then
+         # break out of the loop.
+         break
+      else
+         # if the command failed, OR, we are in looping mode, then we always run
+         # the command again.
+         # if the command was successful, but we are not in looping mode, the while
+         # loop will naturally end.
+         tryCount=$((tryCount+1))
+
+         # manually invoke the cleanup of the command, but only if there's going to
+         # be a retry of it.  Otherwise a cleanup will run outside of the loop
+         # if we are done.
+         if [ ${tryCount} -lt ${retries} ] ; then
+            runCmdCleanup ${timerPid} ${cmdPid}
+         fi
+      fi
+   done
+
+   # The retry loop is done (if there was retries).  Clean up the last command run
+   # because now we might be in loop mode to run again.
+   runCmdCleanup ${timerPid} ${cmdPid}
+
+   loopCount=$((loopCount+1))
+
+   if [ ${verbose} -eq 1 -a \
+        ${loopWait} -ne 0 -a \
+        ${loopCount} -lt ${numLoops} ] ; then
+      echo "Sleeping before running command again."
+   fi
+   
+   sleep ${loopWait}
+   
+done
+      
+# Give the exit code as the result from the script to the shell
+exit ${cmdExitCode}

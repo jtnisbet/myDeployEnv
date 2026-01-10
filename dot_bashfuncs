@@ -1,0 +1,267 @@
+# Some quick bash funcs here. These are bit fancier than simple aliases, but not so fancy that
+# it needs it's own shell scripts.
+
+# loops over all inputs and opens all of them in different windows in
+# emacs.
+e()
+{
+   if [ $# -eq 0 ]; then
+      echo "You dumbass.  You didn't provide an input file to edit!"
+      return 1
+   fi
+
+   for inFile in $@
+   do
+      emacs ${inFile} >> ${HOME}/logs/my_own_logs.log 2>&1 &
+      #emacs ${inFile} &
+   done 
+}
+
+# loop over input files and untar and unzip them
+guntar()
+{
+   for inFile in $@
+   do
+      if [ -f ${inFile} ] ; then
+         if [ "${inFile: -7}" = ".tar.gz" -o "${inFile: -4}" = ".tgz" ] ; then
+            echo "Untarring and unzipping file ${inFile}"
+            tar -zxvf ${inFile}
+         elif [ "${inFile: -4}" = ".tar" ] ; then
+            echo "Untarring file ${inFile}"
+            tar -xvf ${inFile}
+         else
+            echo "${inFile} does not appear to end with .tar, .tgz, or .tar.gz.  Skipping this file."
+         fi
+      fi
+   done 
+}
+
+# emacs creates backup files with ~ appended to the filename.
+# this one will find and delete all backup files in the current path.
+rmback()
+{
+   removeFiles=$(find . -maxdepth 1 -user ${USER} -name "*~")
+
+   if [ "x${removeFiles}" = "x" ] ; then
+      echo "No backup files found for removal."
+      return 0
+   fi
+
+   rm ${removeFiles}
+   echo "Removed these files:"
+   echo ${removeFiles} | tr " " "\n"
+}
+
+rmtrail()
+{
+   for inFile in $@
+   do
+      if [ -f ${inFile} ] ; then
+         echo "Checking file ${inFile} and cleaning trailing whitespace (if any)"
+         sed -i 's/[ \t]*$//' ${inFile}
+      fi
+   done
+}
+
+# removes .o files in case you dont have a handy makefile clean
+rmdoto()
+{
+   removeFiles=$(find . -maxdepth 1 -user ${USER} -name "*.o")
+
+   if [ "x${removeFiles}" = "x" ] ; then
+      echo "No backup files found for removal."
+      return 0
+   fi
+
+   rm ${removeFiles}
+   echo "Removed these files:"
+   echo ${removeFiles} | tr " " "\n"
+}
+
+# A git alias to make pretty one-liner list of commits
+lg()
+{
+   DFLT_NUM=10
+
+   # force the numShow value to be an int to catch bad inputs
+   declare -i numShow
+
+   if [ $# -eq 1 ]; then
+      numShow=${1}
+   else
+      numShow=${DFLT_NUM}
+   fi
+
+   if [ ${numShow} -ne 0 ];then
+      git log --color --pretty=format:'%C(yellow)%h%C(reset) - %s %C(green)%cr%C(reset) %C(bold blue)<%an>' -${numShow}
+   else
+      echo "Syntax: lg [number of commits to display]"
+      echo "By default it will display the last ${DFLT_NUM} commits."
+   fi
+}
+
+# A git alias to display the files that were changed.
+# When no commit id is given, we show the files that are modified (or new files)
+# but have not been committed yet.
+# -a : show absolute paths instead of git project relative paths.
+# -d : allow directories to be shown.  By default it won't show dirs.
+# The output is silent from any fancy headers or words because you may want to
+# use this in a script or pipe the files elsewhere etc.
+lf()
+{
+   # Defaults 
+   absolute=0 # don't show absolute paths
+   showDirs=0 # don't show changes that are purely a directory
+
+   while getopts "ad" opt
+   do
+      case $opt in
+         a) absolute=1
+            ;;
+         d) showDirs=1
+            ;;
+         ?) echo "Syntax: lf [-a] [-d] [commit]"
+            return 1
+            ;;
+      esac
+   done
+
+   # getopts only processes dashed options.
+   # The main arg is the commit id if they provided it.
+   shift $((OPTIND -1))
+   commitId=$1
+
+   if [ $# -gt 1 ]; then
+      echo "Syntax: lf [-a] [-d] [commit]"
+      return 1
+   fi
+
+   # Identify the absolute path to the git repo top level dir, even if -a is not
+   # used.  This will check that we're in a git repo and bail out if not.
+   # After this we'll skip any error checks on git commands.
+   base=$(git rev-parse --show-toplevel 2>/dev/null)
+   rc=$?
+   if [ $rc -ne 0 ] ; then
+      echo "Something went wrong with lf.  Make sure you are in a git path."
+      return 1
+   fi
+
+   # Now get the rest of the path up to pwd.
+   # For example, if you run this command from this path:
+   # /store1/home/jtnisbet/Rainbow/src/github.com/squirreldb
+   # then the base is: /store1/home/jtnisbet/Rainbow
+   # and the prefix will be:
+   # src/github.com/squirreldb
+   prefix=$(git rev-parse --show-prefix)
+
+   # Assign the new base to be the full absolute base path.
+   base="${base}/${prefix}"
+
+   # if no commit id , then get the files that are changed but not committed,
+   # both tracked and untracked files here.
+   if [ "x${commitId}" = "x" ] ; then
+      files=$(git ls-files -m -o --exclude-standard 2>/dev/null)
+   else
+      # The ^ means the commit just before this one
+      cmd="git diff --name-only ${commitId}^ ${commitId}"
+      files=$(${cmd})
+   fi
+
+   # Loop over the files and show them.
+   for fName in `echo $files`
+   do
+      fullPath="${base}${fName}"
+
+      # skip to the next one if we are not allowed to show directory and this
+      # one is a dir
+      if [ ${showDirs} -eq 0 -a -d ${fullPath} ] ; then
+         continue
+      fi
+
+      # either display the full path or just the git relative path depending
+      # on if user provided -a or not
+      if [ ${absolute} -eq 1 ] ; then
+         echo "${fullPath}"
+      else
+         echo "${fName}"
+      fi
+   done
+}
+
+# Extracts a file from a given git commit id
+ef()
+{
+   if [ $# -ne 2 ] ; then
+      echo "ef <filename> <commit id>"
+      return 1
+   fi
+
+   fileName=$1
+   commitId=$2
+
+   newName="${fileName}.${commitId}"
+   git show ${commitId}:${fileName} > ${newName}
+   echo "File extracted: ${newName}"
+   return 0
+}
+
+# Show the diff for this commit compared to the previous one
+cdiff()
+{
+   if [ $# -ne 1 ]; then
+      echo "Syntax: cdiff <commit>"
+      return 1
+   fi
+
+   # The ^ means the commit just before this one
+   cmd="git diff ${1}^ ${1}"
+   ${cmd}
+}
+
+jgrep()
+{
+   if [ $# -lt 1 -o $# -gt 3 ] ; then
+      echo "Searches the current path recursively through all subdirectories"
+      echo "Usage: jgrep <pattern> [<file pattern>] [i | n]"
+      echo "Enclose both <pattern> and <file pattern> in single quotes."
+      echo "Example: jgrep 'this pattern' '*.java' n"
+      echo ""
+      echo "Simplest usage will search all files like:"
+      echo "jgrep <pattern>"
+      return 1
+   fi
+
+   SEARCH_PATTERN="\"$1\""
+   shift
+
+   if [ "x$1" != "x" ] ; then
+      FILE_MATCH="\"$1\""
+   else
+      FILE_MATCH="\"*\""
+   fi
+
+   shift
+   if [ "x$1" != "x" ] ; then
+      DASHI=$1
+   else
+      DASHI="n"
+   fi
+
+   echo "Recursive search from path : ${PWD}"
+   echo "Pattern searched           : $SEARCH_PATTERN"
+   echo "File names searched        : $FILE_MATCH (excluding any binary files)"
+   echo
+
+   if [ "x$DASHI" == "xi" ]; then
+      CMD="grep -RIi --include=${FILE_MATCH} ${SEARCH_PATTERN} ."
+      eval $CMD
+   else
+      CMD="grep -RI --include=${FILE_MATCH} ${SEARCH_PATTERN} ."
+      eval $CMD
+   fi
+
+   # Jamie:
+   # possible alternative way...you can use find command -exec like this:
+   # find . -name "*.cnf" -exec grep 'tcp' {} \;
+   # i.e. this finds all files named like *.cnf and greps for 'tcp' in those files.
+}

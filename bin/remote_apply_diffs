@@ -1,0 +1,22 @@
+#!/bin/bash
+
+# Assume that remote side contains the latest getdiffs script in bin dir
+# Assume that we have passwordless ssh ability
+
+remoteHost="ddgpu4"
+remoteBin="/home/jtnisbet/bin"
+tempDiffsDir=${HOME}/temp/tempdiffs
+
+# clear old run data
+rm -rf ${tempDiffsDir}/*
+
+# Execute a getdiffs for uncommitted changes
+getdiffs -u -o ${tempDiffsDir}
+rc=$?
+if [ ${rc} -ne 0 ] ; then
+    echo "Local getdiffs in uncommitted mode failed"
+    exit 1
+fi
+
+# Execute a getdiffs to apply to remote
+getdiffs -a ddgpu4 -o ${tempDiffsDir}/getdiffs_uncommitted -g /home/jtnisbet/sl

@@ -1,0 +1,24 @@
+#!/bin/bash
+#
+# arg 1 is the full path to a lib
+# arg 2 is the symbol of the function to dump
+# arg 3 is the output file
+
+if [ $# != 3 ] ; then
+   echo "Usage:"
+   echo "disas_from_lib <path to lib> <symbol> <output file>"
+   exit 1
+fi
+
+libToDisas=$1
+symbolToDisas=$2
+outputFile=$3
+
+# old way, but still works:
+#echo "disas $symbolToDisas" | gdb $libToDisas > $outputFile
+
+# new way, I like it better
+gdbCmd="gdb -batch -ex 'file $libToDisas' -ex 'disas $symbolToDisas'"
+echo $gdbCmd
+eval $gdbCmd > $outputFile
+

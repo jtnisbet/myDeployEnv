@@ -1,0 +1,489 @@
+#!/bin/bash
+
+#################################################################################
+#  Name:        getdiffs                                                        #
+#  Description: A tool to extract before and after versions of the files        #
+#               from a git commit.                                              #
+#  Author:      Jamie Nisbet                                                    #
+#  Revisions:   March 08, 2018   : First drop.                                  #
+#               July 10, 2025    : Added Apply mode                             #
+#                                                                               #
+#  See function usage() for syntax and options.                                 #
+#                                                                               #
+#################################################################################
+
+
+#################################################################################
+#  Function: usage                                                              #
+#  Description: Display the usage and quit                                      #
+#################################################################################
+usage()
+{
+   echo "Syntax:"
+   echo "$(basename $0) [-s commit_id] -c <commit_id> [-a] [-o <output_dir>] [-g git_src_path] [-h]"
+   echo
+   echo "Description:"
+   echo "Given a directory within a git project, this tool will create a tar"
+   echo "file that contains the before and after versions of the files from"
+   echo "the input git commit.  Files are created with the same directory"
+   echo "structure as the project files, organized by a new vs orig subdir."
+   echo
+   echo "Options:"
+   echo "    -c <commit_id>    Required option.  Specify the git commit id to"
+   echo "                      extract files from. Before and after versions"
+   echo "                      are based on this commit, compared to the one"
+   echo "                      that immediately precedes it."
+   echo
+   echo "    -s <start_commit> Optional.  If this option is given, then instead"
+   echo "                      of comparing the commit from -c to the one that"
+   echo "                      immediately precedes it, it will compare the"
+   echo "                      files from the start_commit (as given by -s) up"
+   echo "                      to the commit_id (as given from -c option)."
+   echo "                      For example -s abc -c def will get the files that"
+   echo "                      were changed between commit abc and def"
+   echo
+   echo "    -a <remote_host>  Optional.  If this option is given, it takes an"
+   echo "                      existing saved getdiffs collection and writes the"
+   echo "                      changes to the target path."
+   echo "                      WARNING: This is dangerous. It overwrites existing"
+   echo "                      files, so I hope you know what you are doing."
+   echo "                      The existing getdiffs output comes from -o and the"
+   echo "                      target path is from -g"
+   echo "                      remote_host is the host for the target of the copy"
+   echo "                      Use hostname keyword of \"local\" to do non ssh copy"
+   echo
+   echo "    -o <output_dir>   Optional.  Specify the path to save all the"
+   echo "                      files to. A tar.gz will also be created. Default"
+   echo "                      path if this option is not used is the current"
+   echo "                      working directory. For -a mode, this is the path"
+   echo "                      of the existing getdiffs output"
+   echo
+   echo "    -g <git_src_path> Optional. If you are not currently in a git path"
+   echo "                      then this option will use the input git source"
+   echo "                      path before running any git commands. For -a mode"
+   echo "                      this is the path that files will be copied into"
+   echo
+   echo "    -u                Optional. The commit range is the most recent   "
+   echo "                      commit up to the currently uncommitted for new  "
+   echo "                      files. This is a good way to save your changes. "
+   echo
+   echo "    -h                Optional.  Display this help text.  The help  "
+   echo "                      will also be displayed if called with no args."
+   echo
+   echo "Examples:"
+   echo
+   echo "1) Use default git directory (current path) and provide output dir"
+   echo "   with -o option:"
+   echo
+   echo "   From current path ~/Rainbow/src/github.com/squirreldb/c-kudu, run:"
+   echo "   getdiffs -o $HOME/mydiffs -c bc81b2f"
+   echo
+   echo "   This gets the diff info from the current path and outputs to"
+   echo "   $HOME/mydiff directory"
+   echo
+   echo "2) Use default output dir (current path) and provide the git directory"
+   echo "   with -g option:"
+   echo
+   echo "   From path ~/mydiffs/, run:"
+   echo "   gitdiffs -g ~/Rainbow/src/github.com/squirreldb/c-kudu/ -c bc81b2f"
+   echo
+   echo "   This gets the diff info using the git path from -g option, and"
+   echo "   outputs to the current directory ~/mydiffs/"
+   echo
+   echo "3) Get the diffs from a range of commits:"
+   echo
+   echo "   From current path ~/Rainbow/src/github.com/squirreldb/c-kudu, run:"
+   echo "   getdiffs -o ~/mydiffs -s 625274b -c bc81b2f"
+   echo
+   echo "   This gets all the diffs and files from all changes between the"
+   echo "   starting commit from -s up to the end commit from -c."
+   exit 1
+}
+
+#################################################################################
+#  Function: runCmd                                                             #
+#  Description: Runs a command with a pre-command message, followed by ok       #
+#               or fail with nice colours from escape sequence.                 #
+#################################################################################
+runCmd()
+{
+   cmd=$1
+   msg=$2
+
+   TEMP_LOG="$HOME/getdiffs.log"
+
+   printf "%-60s : " "${msg}"
+   eval "${cmd}" > ${TEMP_LOG} 2>&1
+   rc=$?
+   if [ $rc -eq 0 ]; then
+      echo -e '\E[32m'"\e[1mOK\e[0m"
+   else
+      echo -e '\E[31m'"\033[1mFAIL\033[0m Failed with rc=$rc"
+      echo
+      echo "Failed command:"
+      echo "${cmd}"
+      echo
+      # Entire script bails out on failure.
+      echo "Check ${TEMP_LOG} for failure details."
+      exit 1
+   fi
+
+   if [ -f ${TEMP_LOG} ] ; then
+      rm ${TEMP_LOG}
+   fi
+}
+
+#################################################################################
+# Similar to runCmd, these 3 quick functions provide a fancy output display     #
+# related to running commands (but these don't actually run the cmd itself      #
+#################################################################################
+function attemptBegin()
+{
+   printf "%-60s : " "$1"
+}
+
+function attemptOk()
+{
+   echo -e '\E[32m'"\033[1mOK\033[0m"
+}
+
+function attemptFail()
+{
+   echo -e '\E[31m'"\033[1mFAIL\033[0m ${1}"
+}
+
+#################################################################################
+#  Executes the apply mode                                                      #
+#################################################################################
+function executeApplyMode()
+{
+   existingPath=$1
+   targetPath=$2
+   remote=$3
+   fileList="${existingPath}/filesChanged.out"
+
+   if [ -z ${fileList} ] ; then
+      echo "${fileList} not found!"
+      exit 1
+   fi
+   
+   if [ "x${remote}" = "xlocal" -a "x${existingPath}" = "x${targetPath}" ] ; then
+      echo "The path of existing getdiffs and the output source target are the same! ${existingPath}. Please use -o or -g"
+      exit 1
+   fi
+   echo "Apply mode. Existing data is in ${existingPath} and the src target is ${targetPath}"
+   echo
+
+   # Iterate the new files and copy them over
+   echo "Copy changed files now..."
+   for f in `cat ${fileList} | awk '{print $2}'`
+   do
+      newFile="${existingPath}/new/${f}"
+      activeFile="${targetPath}/${f}"
+      if [ "x${remote}" = "xlocal" ] ; then
+         cmd="cp ${newFile} ${activeFile}"
+      else
+         cmd="scp ${newFile} ${remote}:${activeFile}"
+      fi
+      runCmd "${cmd}" "Copy file ${newFile}"
+   done
+}
+
+#################################################################################
+#  Main block                                                                   #
+#################################################################################
+uncommitted=0
+applyMode=0
+remoteHost=""
+while getopts "c:s:o:g:a:hu" opt
+do
+   case $opt in
+      c) endCommit=${OPTARG}
+         ;;
+      s) startCommit=${OPTARG}
+         ;;
+      u) uncommitted=1
+         ;;
+      a) applyMode=1
+         remoteHost=${OPTARG}
+         ;;
+      o) outputDir=${OPTARG}
+         # if the path starts with a / then assume path is absolute.
+         # Otherwise, convert their relative path to absolute
+         if [ "${outputDir:0:1}" != "/" ] ; then
+            outputDir="${PWD}/${outputDir}"
+         fi
+         ;;
+      g) gitSrcDir=${OPTARG}
+         # if the path starts with a / then assume path is absolute.
+         # Otherwise, convert their relative path to absolute
+         if [ "${gitSrcDir:0:1}" != "/" ] ; then
+            gitSrcDir="${PWD}/${gitSrcDir}"
+         fi
+         ;;
+      h) echo "Help:"
+         echo
+         usage
+         ;;
+      ?) echo "Invalid syntax"
+         echo
+         usage
+         ;;
+   esac
+done
+
+# Error checking on inputs...
+if [ $# -eq 0 ] ; then
+   usage
+fi
+
+# In -u mode, we look up the most recent commit and then compare the latest files
+# with the most recent commit (even files that are new or checked out currently).
+# So, set the start commit to be the latest, and the end commit is just a string
+# for naming files later.
+if [ ${uncommitted} -eq 1 ] ; then
+   startCommit=$(git rev-parse --short HEAD)
+   rc=$?
+   if [ ${rc} -ne 0 ] ; then
+      echo "Failed to identify the latest commit"
+      exit 1
+   fi
+   endCommit="uncommitted" 
+fi
+
+if [ "x${endCommit}" = "x" -a ${applyMode} -eq 0 ] ; then
+   echo "Error: -c option is required."
+   echo
+   usage
+fi
+
+currDir="${PWD}"
+
+# If user didn't give an output dir then default output dir
+# is the current path
+if [ "x${outputDir}" = "x" ] ; then
+   outputDir="${PWD}"
+fi
+
+# If the user did not provide git source path, then assume current working
+# dir.
+if [ "x${gitSrcDir}" = "x" ] ; then
+   gitSrcDir="${PWD}"
+fi
+
+# startCommit is optional.  If not given, then startCommit is the
+# commit that immediately precedes the -c commit.  git has nifty ^
+# symbol for that
+if [ "x${startCommit}" = "x" ] ; then
+   startCommit="${endCommit}^"
+fi
+
+# create a dir that includes the commit id in it's name
+if [ -d ${outputDir} ] ; then
+   if [ ${applyMode} -eq 0 ] ; then
+      # Save the tar dir for the final tarup at the end
+      tarDir="getdiffs_${endCommit}"
+
+      # base will be the base dir where all output is written with a nice
+      # subdir to organize everything.
+      base="${outputDir}/${tarDir}"
+      cmd="mkdir ${base}"
+      runCmd "${cmd}" "Creating directory for output"
+   else
+      base="${outputDir}"
+   fi
+else
+   echo "${outputDir} does not exist"
+   exit 1
+fi
+
+filesChanged="${base}/filesChanged.out"
+origFiles="${base}/origFiles.out"
+newSrc="${base}/new"
+origSrc="${base}/orig"
+tarFile="${outputDir}/getdiffs_${endCommit}.tar.gz"
+
+if [ ${applyMode} -eq 1 ] ; then
+   executeApplyMode "${base}" "${gitSrcDir}" "${remoteHost}"
+
+   # Apply mode does not do the regular work. Quit the tool now
+   exit 0
+fi
+
+# move to the git source path before running any git commands
+cd ${gitSrcDir}
+rc=$?
+if [ ${rc} -ne 0 ] ; then
+   echo "Could not change directory to git source path ${gitSrcPath}"
+   exit 1
+fi
+
+# produce a file with the total list of files changed
+# note that git outputs path names relative to base path of the git
+# src.
+# in uncommitted mode the list of files is all of the files in modified status
+# or new files.
+if [ ${uncommitted} -eq 0 ] ; then
+   cmd="git diff --name-status ${startCommit} ${endCommit} > ${filesChanged}"
+   runCmd "${cmd}" "Getting list of files that were changed"
+else
+   cmd="git status --porcelain > ${filesChanged}"
+   runCmd "${cmd}" "Getting list of files that were changed"
+fi
+
+# Construct a second list of files that will contain only the files
+# that existed in the original commit.
+# the lines look like this:
+# M       src/datasystem/master/object_cache/CMakeLists.txt
+# D       src/datasystem/master/object_cache/master_cluster_manager.cpp
+# R067    src/datasystem/worker/object_cache/worker_cluster_manager.h     src/datasystem/worker/object_cache/etcd_cluster_manager.h
+# This loop process each space delimited token, so M, filename, D, filename are all processed.
+# We just let those meta fields fail as they wont be real files.
+# In the rename case, the second file is the new name, and it won't exist so we let that one fail as well.
+for f in `cat ${filesChanged}`
+do
+   # -e option of cat-file will report error rc to shell if the object
+   # does not exist or 0 on success (we don't want to show the error
+   # output here)    
+   git cat-file -e ${startCommit}:${f} > /dev/null 2>&1
+   checkExists=$?
+   if [ ${checkExists} -eq 0 ] ; then
+      echo ${f} >> ${origFiles}
+   fi
+done
+
+mkdir ${newSrc}
+mkdir ${origSrc}
+
+attemptBegin "Copying files out of git for the start commit"
+for f in `cat ${origFiles}`
+do
+   # Create the dir if needed
+   newDir=$(dirname "${f}")
+   if [ ! -d ${origSrc}/${newDir} ] ; then
+      mkdir -p ${origSrc}/${newDir}
+      rc=$?
+      if [ ${rc} -ne 0 ] ; then
+         attemptFail "Could not create ${newDir}"
+         exit 1
+      fi
+   fi
+
+   # copy this version of the file into the path.
+   cmd="git show ${startCommit}:${f} > ${origSrc}/${f}"
+   eval "${cmd}"
+   rc=$?
+   if [ ${rc} -ne 0 ] ; then
+      attemptFail "Failed to run command."
+      echo "Cmd: ${cmd}"
+      exit 1
+   fi
+done
+attemptOk
+
+attemptBegin "Copying files out of git for the end commit"
+for f in `cat ${filesChanged} | awk '{print $1":"$2":"$3}'`
+do
+   checkType=$(echo $f | awk -F":" '{print $1}')
+
+   # If the file change was a delete, then nothing to copy out
+   if [ "x${checkType}" = "xD" ] ; then
+      continue
+   fi
+
+   # If the file change was rename, then copy out the second file mentioned.
+   # The first file is the original name that does exist in the second commit
+   # The type of fields look like this: R067, R070, R065..etc.  dunno what the
+   # number means but it seems to start with R0 anyway...
+   if [ "x${checkType:0:2}" = "xR0" ] ; then
+      fName=$(echo $f | awk -F":" '{print $3}')
+   else
+      fName=$(echo $f | awk -F":" '{print $2}')
+   fi
+
+   # Create the dir if needed
+   newDir=$(dirname "${fName}")
+   if [ ! -d ${newSrc}/${newDir} ] ; then
+       mkdir -p ${newSrc}/${newDir}
+       rc=$?
+       if [ ${rc} -ne 0 ] ; then
+          attemptFail "Could not create ${newDir}"
+          exit 1
+       fi
+   fi
+
+   if [ ${uncommitted} -eq 0 ] ; then
+      # use git show to copy this version of the file into the path.
+      cmd="git show ${endCommit}:${fName} > ${newSrc}/${fName}"
+      eval "${cmd}"
+      rc=$?
+      if [ ${rc} -ne 0 ] ; then
+         attemptFail "Failed to run command."
+         echo "Cmd: ${cmd}"
+         exit 1
+      fi
+   else
+      # copy this version of the file into the path directly using OS command
+      # -r is added because it may be the case the a whole new directory is added
+      cmd="cp -r ${fName} ${newSrc}/${fName}"
+      eval "${cmd}"
+      rc=$?
+      if [ ${rc} -ne 0 ] ; then
+         attemptFail "Failed to run command."
+         echo "Cmd: ${cmd}"
+         exit 1
+      fi
+   fi
+done
+attemptOk
+
+attemptBegin "Compute file diffs"
+for f in `cat ${filesChanged} | awk '{print $1":"$2":"$3}'`
+do
+
+   checkType=$(echo $f | cut -d ':' -f1)
+
+   # If the file change was a delete, then nothing to diff
+   if [ "x${checkType}" = "xD" ] ; then
+      fName=$(echo $f | cut -d ':' -f2)
+      echo "${fName} was a deleted file. No diffs to show." > ${newSrc}/${fName}.diff
+      continue
+   fi
+
+   # If the file change was rename, then copy out the second file mentioned.
+   # The first file is the original name that does exist in the second commit
+   if [ "x${checkType:0:2}" = "xR0" ] ; then
+      fName=$(echo $f | cut -d ':' -f2)
+      fName2=$(echo $f | cut -d ':' -f3)
+   else
+      # The first and second file have same name
+      fName=$(echo $f | cut -d ':' -f2)
+      fName2=${fName}       
+   fi
+
+   if [ -f ${origSrc}/${fName} ] ; then
+      # This would be the place to inject your own text based diff tool if you
+      # know of a better one than regular diff
+      cmd="diff ${origSrc}/${fName} ${newSrc}/${fName2} > ${newSrc}/${fName2}.diff"
+      eval "${cmd}"
+
+# Silly diff command returns the number of diffs to $? so I don't know how
+# to error check if it failed!
+#      rc=$?
+#      if [ ${rc} -ne 0 ] ; then
+#         attemptFail "Failed to run command."
+#         echo "Cmd: ${cmd}"
+#         exit 1
+#      fi
+
+   fi
+done
+attemptOk
+
+# create the tar file with all of the stuff created
+cmd="tar -cz -C ${outputDir} -f ${tarFile} ${tarDir}"
+runCmd "${cmd}" "Create tar file"
+cd ${currDir}
+echo
+echo "Done.  Output written to: ${outputDir}"
+echo "Tar file: ${tarFile}"

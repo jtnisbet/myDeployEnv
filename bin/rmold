@@ -1,0 +1,52 @@
+#!/bin/bash
+# Jamie's handy dandy old file remover script
+
+DEPTH=1
+DAYS_OLD=7
+searchPattern=$1
+
+if [ $# -ne 1 ] ; then
+   echo "Syntax: rmold '<search pattern>'"
+   echo "Tip: you have to enclose the search pattern with ' characters to avoid shell expansion of wild cards."
+   exit 1
+fi
+
+echo "Old file remover tool"
+echo "---------------------"
+echo "Defined search criteria:"
+echo "  File owner                : ${USER}"
+echo "  Date                      : older than ${DAYS_OLD} days"
+echo "  File name                 : '${searchPattern}'"
+
+if [ ${DEPTH} -eq 1 ] ; then
+   echo "  Recursive directory depth : 1 (current directory only)"
+else
+   echo "  Recursive directory depth : ${DEPTH}"
+fi
+
+sleep 1
+
+removeFiles=$(find . -maxdepth ${DEPTH} -mtime +${DAYS_OLD} -user ${USER} -name "${searchPattern}" -exec echo {} \;)
+
+if [ "x${removeFiles}" = "x" ] ; then
+   echo
+   echo "No files were found that match the search criteria."
+   exit 0
+fi
+
+echo
+echo "The following files will be removed:"
+echo ${removeFiles} | tr " " "\n"
+echo
+
+echo "Are you sure? (y/n)"
+read answer
+echo
+
+if [ "x${answer}" = "xy" ]; then
+   rm ${removeFiles}
+   echo "ok.  Removed those files."
+else
+   echo "ok.  No files have been removed."
+fi
+

@@ -1,0 +1,100 @@
+#!/bin/bash
+#
+# proj [<project name>]
+#
+# If <project name> argument is not given, display all the possible projects,
+# otherwise, switch the sym link to become that project.
+
+if [ $# -gt 1 ] ; then
+   echo "Either 0 or 1 arguments expected."
+   echo
+   echo "Syntax: $(basename $0) [<project_name>]"
+   echo
+   exit 1
+fi
+
+echo
+
+projectDirs="${HOME}/projects"
+
+# Run a search for any git projects using find command in the container path for my
+# git repo's, strip off the actual .git dir so you are left with only the project
+# dir name
+projectGits=$(find ${projectDirs} -maxdepth 2 -type d -name ".git" -exec dirname {} \;)
+
+# My naming conventions is that all sl git repo's will start with "sl_"
+# Nevertheless, only fish out the ones that meet that criteria and add to an array.
+projCount=0
+for i in ${projectGits}
+do
+   isSL=$(echo $i | awk '$0 ~ /sl_/')
+   if [ "x${isSL}" != "x" ] ; then
+      projects[${projCount}]="$i"
+      projCount=$((projCount+1))
+   fi
+done
+
+projLink="${HOME}/sl"
+
+# if there is no args, just display the list from the array.
+# if an arg was given, change the sym link to point to that project
+if [ $# -eq 1 ] ; then
+   projectPath=$1
+
+   # check if they gave the short name without sl_ in the front.
+   # i.e. we want to treat projname == sl_projname
+   # here, we assume they gave only the project name where we assume
+   # it's in defined projectDir
+   isSL=$(echo ${projectPath} | awk '$0 ~ /sl_/')
+   if [ "x${isSL}" = "x" ] ; then
+      projectPath=$(echo "sl_${projectPath}")
+   fi
+
+   # if the path starts with a / then assume path is absolute.
+   # Otherwise, assume that their path is anchored in home dir.
+   if [ "${projectPath:0:1}" != "/" ] ; then
+        projectPath="${projectDirs}/${projectPath}"
+   fi
+
+   if [ ! -d ${projectPath} ] ; then
+      echo "${projectPath} not found."
+      exit 1
+   fi
+
+   if [ ! -d ${projectPath}/.git ] ; then
+      echo "${projectPath} does not seem to be a git repo."
+      exit 1
+   fi
+
+   # If they didn't have a current project then there's no link to delete
+   if [ -L "${projLink}" ] ; then
+      rm ${projLink}
+   fi  
+
+   # set the new link
+   ln -s ${projectPath} ${projLink}
+
+   echo "Project is now linked to ${projectPath} using the link ${projLink}"
+   echo
+fi
+
+if [ ${projCount} -gt 0 ] ; then
+   echo "Project List"
+   echo "------------"
+fi
+
+currProj=""
+if [ -L "${projLink}" ] ; then
+   currProj=$(readlink -f ${projLink})
+fi
+
+for ((index=0; index<${projCount}; index++))
+do
+   if [ "${projects[$index]}" = "${currProj}" ] ; then
+       echo -e "${projects[$index]} "'\E[32m'"\033[1m==>\033[0m Current project"
+   else
+      echo "${projects[$index]}"
+   fi
+done
+
+echo
